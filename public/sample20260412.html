@@ -2,141 +2,311 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width">
-  <title>Video Pixel Exporter（フレーム間隔版）</title>
-  <style>body{font-family:sans-serif;max-width:900px;margin:24px auto;padding:0 16px;}
-  video,canvas{max-width:100%;display:block;margin:12px 0;}
-  label{display:block;margin:8px 0;}
-  button{padding:8px 16px;margin:4px;cursor:pointer;}
-  button:disabled{background:#ccc;cursor:not-allowed;}
-  #status{margin:12px 0;padding:8px;background:#f0f8ff;border-radius:4px;}
-  input{width:80px;}
-  #controls{margin-top:16px;padding:12px;background:#f9f9f9;border-radius:4px;}
-  .error{color:#d00;}
-  </style>
+  <title>Video Pixel Extractor（完全版・大プレビュー）</title>
+  <style>body{font-family:sans-serif;max-width:1200px;margin:24px auto;padding:20px;}
+  video,canvas{max-width:100%;height:auto;border:1px solid #ccc;display:block;margin:10px 0;}
+  #previewCanvas{border:3px solid #007cba;background:#000;position:relative;display:block;margin:20px auto;box-shadow:0 4px 12px rgba(0,124,186,0.3);}
+  #pixelInfo{position:absolute;top:10px;left:10px;background:rgba(0,0,0,0.9);color:#fff;padding:10px;border-radius:6px;font-size:16px;font-family:monospace;font-weight:bold;min-width:160px;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,0.5);}
+  #crosshair{position:absolute;top:0;left:50%;transform:translateX(-50%);pointer-events:none;}
+  label{display:block;margin:8px 0;font-weight:bold;}
+  input{width:70px;margin:0 5px;}
+  button{padding:12px 20px;margin:5px;font-weight:bold;cursor:pointer;border:1px solid #007cba;background:#e6f3ff;border-radius:4px;}
+  button:hover{background:#d0eaff;}
+  button:disabled{background:#ccc;color:#666;cursor:not-allowed;}
+  #status{padding:12px;background:#f0f8ff;border-left:4px solid #007cba;margin:15px 0;border-radius:4px;}
+  #debug{padding:10px;background:#fff3cd;border:1px solid #ffeaa7;margin:10px 0;font-family:monospace;font-size:13px;max-height:200px;overflow-y:auto;}
+  #downloadLink{display:block;margin:15px 0;padding:12px;background:#e8f5e8;border:1px solid #4caf50;border-radius:4px;text-align:center;font-weight:bold;}
+  .error{background:#ffebee !important;border-left-color:#d32f2f !important;}
+  progress{width:100%;height:20px;margin:10px 0;border-radius:10px;}
+  .controls{display:grid;grid-template-columns:1fr 1fr 1fr;gap:15px;margin:20px 0;}
+  .preview-area{text-align:center;margin:20px 0;position:relative;}
+  .pixel-value{display:inline-block;background:#007cba;color:white;padding:4px 8px;border-radius:4px;font-family:monospace;font-size:14px;margin:2px;font-weight:bold;min-width:28px;text-align:center;}
+  .controls div{padding:10px;border:1px solid #e0e0e0;border-radius:6px;background:#fafafa;}</style>
 </head>
 <body>
-  <h1>MP4 → 指定座標の画素値 → CSV（フレーム間隔）</h1>
-
-  <input id="file" type="file" accept="video/mp4,.mp4">
-  <label>X: <input id="x" type="number" value="280" min="0"></label>
-  <label>Y: <input id="y" type="number" value="180" min="0"></label>
+  <h1>🎬 Video → Pixel CSV Extractor（完全版）</h1>
   
-  <!-- ★ フレーム間隔に変更 -->
-  <label>間隔(フレーム): <input id="frameInterval" type="number" value="30" min="1"></label>
-  <label>FPS: <span id="fpsDisplay">-</span></label>
-  <label>開始フレーム: <input id="startFrame" type="number" value="0" min="0"></label>
-  <label>終了フレーム: <input id="endFrame" type="number" value="1800" min="0"></label>
+  <label style="font-size:18px;margin-bottom:15px;">
+    📁 MP4ファイル: 
+    <input id="file" type="file" accept="video/mp4" style="margin-left:10px;font-size:16px;padding:5px;">
+  </label>
 
-  <button id="test1">1フレーム取得＋検証</button>
-  <button id="extract">範囲抽出→CSV</button>
-  <button id="stop" disabled>中断</button>
-
-  <video id="video" controls muted playsinline></video>
-  <canvas id="canvas" style="border:1px solid #ccc;"></canvas>
-  <div id="status"></div>
-  <div id="controls">
-    <label><input id="showCross" type="checkbox" checked> 十字表示</label>
-    <label>十字サイズ: <input id="crossSize" type="range" min="5" max="30" value="10"><span id="crossSizeVal">10px</span></label>
-    <label><input id="robustMode" type="checkbox" checked> 堅牢モード</label>
-    <label>ファイル: <span id="fileInfo"></span></label>
+  <div class="controls">
+    <div>
+      <label>🎯 X座標: <input id="x" type="number" value="960" min="0" max="1919" style="width:80px;"></label>
+      <label>🎯 Y座標: <input id="y" type="number" value="540" min="0" max="1079" style="width:80px;"></label>
+    </div>
+    <div>
+      <label>⏱️ FPS: <input id="fps" type="number" value="90" step="0.1" style="width:70px;"> 
+        <small id="detectedFps" style="color:#666;">自動検出</small>
+      </label>
+      <label>🔢 間隔(フレーム): <input id="frameInterval" type="number" value="90" min="1" style="width:80px;"></label>
+    </div>
+    <div>
+      <label>📍 開始フレーム: <input id="startFrame" type="number" value="0" style="width:100px;"></label>
+      <label style="font-size:14px;">総フレーム: <span id="totalFrames" style="color:#007cba;font-weight:bold;">解析中...</span></label>
+      <label>📍 終了フレーム: <input id="endFrame" type="number" value="9000" style="width:100px;"></label>
+    </div>
   </div>
 
+  <div style="text-align:center;margin:20px 0;">
+    <button id="testPixel">🎯 ピクセル値テスト取得</button>
+    <button id="extract">💾 全フレーム抽出→CSV</button>
+    <button id="stop" disabled style="background:#ff6b6b;color:white;border-color:#d32f2f;">⏹️ 処理中断</button>
+  </div>
+
+  <video id="video" controls muted preload="metadata" style="background:#000;max-width:960px;margin:0 auto;display:block;"></video>
+  
+  <div class="preview-area">
+    <canvas id="previewCanvas" width="960" height="540"></canvas>
+    <canvas id="crosshair" width="960" height="540"></canvas>
+    <div id="pixelInfo" style="display:none;">
+      <div id="coordInfo">座標未設定</div>
+      <div id="rgbInfo">RGB値取得</div>
+    </div>
+  </div>
+  
+  <canvas id="canvas" style="display:none;"></canvas>
+  
+  <progress id="progress" value="0" max="100" style="display:none;"></progress>
+  
+  <div id="status">MP4ファイルを選択すると自動解析＋大プレビュー（960x540）が開始します。</div>
+  <div id="debug"></div>
+  <a id="downloadLink" style="display:none;" download>📥 <span id="downloadName">ファイル名.csv</span> をダウンロード</a>
+
   <script>
-    const els={file:document.getElementById('file'),x:document.getElementById('x'),y:document.getElementById('y'),
-      frameInterval:document.getElementById('frameInterval'),fpsDisplay:document.getElementById('fpsDisplay'),
-      startFrame:document.getElementById('startFrame'),endFrame:document.getElementById('endFrame'),
-      test1:document.getElementById('test1'),extract:document.getElementById('extract'),stop:document.getElementById('stop'),
-      video:document.getElementById('video'),canvas:document.getElementById('canvas'),status:document.getElementById('status'),
-      showCross:document.getElementById('showCross'),crossSize:document.getElementById('crossSize'),crossSizeVal:document.getElementById('crossSizeVal'),
-      robustMode:document.getElementById('robustMode'),fileInfo:document.getElementById('fileInfo')};
-    const ctx=els.canvas.getContext('2d',{willReadFrequently:true});
-    let objectUrl=null,isExtracting=false;
+    const els={
+      file:document.getElementById('file'),video:document.getElementById('video'),
+      canvas:document.getElementById('canvas'),previewCanvas:document.getElementById('previewCanvas'),
+      crosshair:document.getElementById('crosshair'),pixelInfo:document.getElementById('pixelInfo'),
+      coordInfo:document.getElementById('coordInfo'),rgbInfo:document.getElementById('rgbInfo'),
+      status:document.getElementById('status'),debug:document.getElementById('debug'),
+      x:document.getElementById('x'),y:document.getElementById('y'),fps:document.getElementById('fps'),
+      frameInterval:document.getElementById('frameInterval'),startFrame:document.getElementById('startFrame'),
+      endFrame:document.getElementById('endFrame'),totalFrames:document.getElementById('totalFrames'),
+      detectedFps:document.getElementById('detectedFps'),testPixel:document.getElementById('testPixel'),
+      extract:document.getElementById('extract'),stop:document.getElementById('stop'),
+      progress:document.getElementById('progress'),downloadLink:document.getElementById('downloadLink'),
+      downloadName:document.getElementById('downloadName')
+    };
+    
+    const ctx = els.canvas.getContext('2d');
+    const previewCtx = els.previewCanvas.getContext('2d');
+    const crossCtx = els.crosshair.getContext('2d');
+    let isExtracting = false, isAnalyzing = false;
+    let detectedFps = 0, totalVideoFrames = 0, videoReady = false, currentPixel = {r:0,g:0,b:0,a:0};
 
-    els.file.addEventListener('change',()=>{
-      if(objectUrl)URL.revokeObjectURL(objectUrl);
-      const file=els.file.files[0];
-      if(!file) return;
-      objectUrl=URL.createObjectURL(file);
-      els.video.src=objectUrl;
-      els.fileInfo.textContent=`${file.name} (${(file.size/1024/1024).toFixed(1)}MB)`;
-      updateStatus(`動画読み込み中: ${file.name}`);
-    });
-
-    // FPS表示更新
-    els.video.addEventListener('loadedmetadata',()=>{
-      const fps=Math.round(els.video.playbackRate*100)/100 || 30;
-      els.fpsDisplay.textContent=fps;
-      const totalFrames=Math.floor(els.video.duration*fps);
-      els.endFrame.value=totalFrames;
-      updateStatus(`総フレーム数: ${totalFrames} (${els.video.duration.toFixed(1)}秒)`);
-    });
-
-    function drawCross(x,y,size,color='red'){
-      ctx.strokeStyle=color;ctx.lineWidth=3;ctx.lineCap='round';
-      ctx.beginPath();ctx.moveTo(x-size,y);ctx.lineTo(x+size,y);ctx.stroke();
-      ctx.beginPath();ctx.moveTo(x,y-size);ctx.lineTo(x,y+size);ctx.stroke();
-      ctx.fillStyle=color;ctx.font='bold 14px sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';
-      ctx.fillText(`(${Math.floor(x)},${Math.floor(y)})`,x,y+size+20);
-    }
-
-    function redrawCross(){
-      const x=Number(els.x.value),y=Number(els.y.value);
-      if(els.video.videoWidth){
-        ctx.clearRect(0,0,els.canvas.width,els.canvas.height);
-        ctx.drawImage(els.video,0,0);
-        if(els.showCross.checked) drawCross(x,y,Number(els.crossSize.value));
-      }
-    }
-
-    els.x.addEventListener('input',redrawCross);els.y.addEventListener('input',redrawCross);
-    els.showCross.addEventListener('change',redrawCross);
-    els.crossSize.addEventListener('input',()=>{els.crossSizeVal.textContent=els.crossSize.value+'px';redrawCross();});
-
-    function updateStatus(msg,className=''){
-      els.status.textContent=`[${new Date().toLocaleTimeString()}] ${msg}`;
-      els.status.className=className;
+    // ログ・ステータス
+    function log(msg, isError = false) {
+      const timestamp = new Date().toLocaleTimeString('ja-JP');
+      els.debug.innerHTML += `[${timestamp}] ${msg}\n`;
+      els.debug.scrollTop = els.debug.scrollHeight;
       console.log(msg);
     }
 
-    async function waitVideoReady(){
-      return new Promise(r=>{if(els.video.readyState>=2)return r();els.video.addEventListener('loadeddata',r,{once:true});});
+    function updateStatus(msg, isError = false) {
+      els.status.textContent = msg;
+      els.status.className = isError ? 'error' : '';
     }
 
-    // ★ フレーム番号→時間変換
-    function frameToTime(frame,fps){
-      return frame / fps;
+    function setButtons(analyzing = false, extracting = false) {
+      els.testPixel.disabled = analyzing || extracting;
+      els.extract.disabled = analyzing || extracting;
+      els.stop.disabled = !analyzing && !extracting;
     }
 
-    async function getFramePixelSafely(targetFrame,x,y){
-      const fps=els.video.playbackRate || 30;
-      const targetTime=frameToTime(targetFrame,fps);
-      return new Promise(async (resolve,reject)=>{
-        els.video.currentTime=targetTime;
-        await new Promise((r,reject)=>{
-          const timeout=Date.now()+3000;
-          const checkSeeked=()=>{
-            if(els.video.readyState>=2 && Math.abs(els.video.currentTime-targetTime)<0.03) return r();
-            if(Date.now()>timeout) return reject('seek timeout');
-            requestAnimationFrame(checkSeeked);
-          };
-          requestAnimationFrame(checkSeeked);
-        });
-        if(els.robustMode.checked) await new Promise(r=>setTimeout(r,50));
-        els.canvas.width=els.video.videoWidth;
-        els.canvas.height=els.video.videoHeight;
-        ctx.drawImage(els.video,0,0);
-        const data=ctx.getImageData(Math.floor(x),Math.floor(y),1,1).data;
-        resolve([data[0],data[1],data[2],data[3]]);
-      });
+    // 大きなクロスヘア（視認性抜群）
+    function drawCrosshair(x, y) {
+      crossCtx.clearRect(0, 0, 960, 540);
+      const scale = 960 / 1920;
+      const px = Math.floor(x * scale);
+      const py = Math.floor(y * scale);
+      
+      const pulse = Math.sin(Date.now() / 200) * 0.3 + 0.7;
+      crossCtx.strokeStyle = `rgba(255, 50, 50, ${pulse})`;
+      crossCtx.lineWidth = 4;
+      crossCtx.lineCap = 'round';
+      
+      // 十字線
+      crossCtx.beginPath(); crossCtx.moveTo(0, py); crossCtx.lineTo(960, py); crossCtx.stroke();
+      crossCtx.beginPath(); crossCtx.moveTo(px, 0); crossCtx.lineTo(px, 540); crossCtx.stroke();
+      
+      // 中央白丸
+      crossCtx.fillStyle = `rgba(255, 255, 255, ${pulse})`;
+      crossCtx.beginPath(); crossCtx.arc(px, py, 8, 0, Math.PI * 2); crossCtx.fill();
+      crossCtx.strokeStyle = `rgba(255, 50, 50, ${pulse})`; crossCtx.lineWidth = 2; crossCtx.stroke();
     }
 
-    els.test1.addEventListener('click',async()=>{
-      if(!els.file.files[0]){updateStatus('ファイルを選択','error');return;}
-      const x=Number(els.x.value),y=Number(els.y.value);
-      await new Promise(r=>setTimeout(r,100));
-      const w=els.video.videoWidth,h=els.video.videoHeight;
-      if(x>=w||y>=h||x<0||y<0){updateStatus(`座標エラー: ${w}x${h}`,'error');return;}
-      try{
-        updateStatus('1フレーム取得中...');
+    // プレビュー更新
+    async function updatePixelPreview() {
+      if (!videoReady) return;
+      const x = parseInt(els.x.value), y = parseInt(els.y.value), frame = parseInt(els.startFrame.value);
+      
+      els.video.currentTime = frame / detectedFps;
+      await new Promise(r => setTimeout(r, 30));
+      
+      previewCtx.drawImage(els.video, 0, 0, 960, 540);
+      drawCrosshair(x, y);
+      
+      els.coordInfo.textContent = `(X:${x.toLocaleString()}, Y:${y.toLocaleString()}) F:${frame.toLocaleString()}`;
+      if (currentPixel.r) {
+        els.rgbInfo.innerHTML = `RGB(<span class="pixel-value">${currentPixel.r}</span>,<span class="pixel-value">${currentPixel.g}</span>,<span class="pixel-value">${currentPixel.b}</span>) A:<span class="pixel-value">${currentPixel.a}</span>`;
+      }
+      els.pixelInfo.style.display = 'block';
+    }
+
+    // 入力監視
+    els.x.addEventListener('input', () => { els.x.value = Math.max(0, Math.min(1919, +els.x.value)); updatePixelPreview(); });
+    els.y.addEventListener('input', () => { els.y.value = Math.max(0, Math.min(1079, +els.y.value)); updatePixelPreview(); });
+    els.startFrame.addEventListener('input', updatePixelPreview);
+
+    // 🔥 **完全実装: FPS自動解析**
+    async function autoAnalyze() {
+      if (isAnalyzing || !els.video.duration) return;
+      
+      isAnalyzing = true; setButtons(true);
+      updateStatus('🔄 FPS自動解析実行中（高精度90サンプル）...'); els.detectedFps.textContent = '解析中...';
+      
+      try {
+        els.video.currentTime = 0; await els.video.play();
+        const frameTimes = [], maxSamples = 90;
         
+        const checkFrame = () => {
+          frameTimes.push(performance.now());
+          if (frameTimes.length < maxSamples) requestAnimationFrame(checkFrame);
+          else {
+            const elapsed = (frameTimes[maxSamples-1] - frameTimes[0]) / 1000;
+            detectedFps = (maxSamples - 1) / elapsed;
+            els.fps.value = detectedFps;
+            els.detectedFps.textContent = `${detectedFps.toFixed(2)} FPS`;
+            
+            totalVideoFrames = Math.floor(els.video.duration * detectedFps);
+            els.totalFrames.textContent = totalVideoFrames.toLocaleString();
+            els.endFrame.value = Math.min(totalVideoFrames, +els.endFrame.value);
+            
+            els.video.pause(); videoReady = true; isAnalyzing = false;
+            setButtons(false);
+            updateStatus(`✅ 解析完了！${detectedFps.toFixed(2)} FPS (${totalVideoFrames.toLocaleString()}フレーム)`);
+            log(`解析結果: FPS=${detectedFps.toFixed(3)}, 総フレーム=${totalVideoFrames.toLocaleString()}, 再生時間=${(els.video.duration/3600).toFixed(1)}時間`);
+            updatePixelPreview();
+          }
+        };
+        requestAnimationFrame(checkFrame);
+      } catch(e) {
+        log(`解析エラー: ${e.message}`, true); updateStatus(`❌ 解析エラー: ${e.message}`, true);
+        isAnalyzing = false; setButtons(false);
+      }
+    }
+
+    // ファイルロード
+    els.file.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file || file.type !== 'video/mp4') return updateStatus('❌ MP4ファイルのみ対応', true);
+      
+      const url = URL.createObjectURL(file);
+      els.video.src = url;
+      els.downloadName.textContent = file.name.replace(/\.[^/.]+$/, '') + '_pixels.csv';
+      els.pixelInfo.style.display = 'none';
+      
+      log(`📁 ロード: ${file.name} (${(file.size/1024/1024).toFixed(1)}MB)`);
+      updateStatus('📥 動画読み込み中...自動解析準備');
+    });
+
+    els.video.addEventListener('loadedmetadata', async () => {
+      els.x.max = els.video.videoWidth - 1; els.y.max = els.video.videoHeight - 1;
+      els.x.value = Math.floor(els.video.videoWidth / 2);
+      els.y.value = Math.floor(els.video.videoHeight / 2);
+      log(`📹 動画情報: ${(els.video.duration/60).toFixed(1)}分 ${els.video.videoWidth}x${els.video.videoHeight}`);
+      await autoAnalyze();
+    });
+
+    // 🔥 **完全実装: ピクセルテスト**
+    els.testPixel.addEventListener('click', async () => {
+      if (!videoReady) return updateStatus('⏳ 解析完了待ち', true);
+      const x = +els.x.value, y = +els.y.value, frame = +els.startFrame.value;
+      
+      if (x >= els.video.videoWidth || y >= els.video.videoHeight) 
+        return updateStatus('❌ 座標が動画範囲外', true);
+      
+      els.video.currentTime = frame / detectedFps;
+      await new Promise(r => els.video.onseeked = r);
+      
+      els.canvas.width = els.video.videoWidth; els.canvas.height = els.video.videoHeight;
+      ctx.drawImage(els.video, 0, 0);
+      const data = ctx.getImageData(x, y, 1, 1).data;
+      
+      currentPixel = {r:data[0],g:data[1],b:data[2],a:data[3]};
+      log(`🎯 テスト: F${frame} (${x},${y}) RGB(${currentPixel.r},${currentPixel.g},${currentPixel.b})A${currentPixel.a}`);
+      updateStatus(`✅ テスト取得: RGB(${currentPixel.r},${currentPixel.g},${currentPixel.b})`);
+      updatePixelPreview();
+    });
+
+    // 🔥 **完全実装: 全フレーム抽出→CSV**
+    els.extract.addEventListener('click', async () => {
+      if (!videoReady) return updateStatus('⏳ 解析完了待ち', true);
+      
+      const x = +els.x.value, y = +els.y.value;
+      const fps = detectedFps, interval = +els.frameInterval.value;
+      const startFrame = +els.startFrame.value, endFrame = Math.min(+els.endFrame.value, totalVideoFrames);
+      
+      if (x >= els.video.videoWidth || y >= els.video.videoHeight) 
+        return updateStatus('❌ 座標が範囲外', true);
+      
+      isExtracting = true; setButtons(false, true); els.progress.style.display = 'block'; els.progress.value = 0;
+      updateStatus('🚀 ピクセル抽出開始...'); els.pixelInfo.style.display = 'none';
+      
+      log(`💾 抽出開始: (${x},${y}) FPS:${fps.toFixed(1)} 間隔:${interval} F${startFrame}-${endFrame}`);
+      
+      els.canvas.width = els.video.videoWidth; els.canvas.height = els.video.videoHeight;
+      const pixels = ['フレーム,時間[s],R,G,B,A'];
+      let processed = 0, currentFrame = startFrame;
+      const totalSteps = Math.floor((endFrame - startFrame) / interval) + 1;
+      
+      try {
+        els.video.currentTime = startFrame / fps;
+        await new Promise(r => els.video.onseeked = r);
+        await els.video.play();
+        
+        const extractNext = async () => {
+          if (!isExtracting || currentFrame > endFrame) return finalize();
+          
+          els.video.currentTime = currentFrame / fps;
+          await new Promise(r => els.video.onseeked = r);
+          
+          ctx.drawImage(els.video, 0, 0);
+          const data = ctx.getImageData(x, y, 1, 1).data;
+          const timeSec = (currentFrame / fps).toFixed(3);
+          pixels.push(`${currentFrame},${timeSec},${data[0]},${data[1]},${data[2]},${data[3]}`);
+          
+          processed++; els.progress.value = (processed / totalSteps) * 100;
+          currentFrame += interval;
+          requestAnimationFrame(extractNext);
+        };
+        
+        extractNext();
+      } catch(e) {
+        log(`抽出エラー: ${e.message}`, true); finalize();
+      }
+      
+      function finalize() {
+        els.video.pause(); els.progress.style.display = 'none'; isExtracting = false;
+        const csv = pixels.join('\n');
+        const blob = new Blob([new TextEncoder().encode('\ufeff' + csv)], {type: 'text/csv;charset=utf-8'});
+        els.downloadLink.href = URL.createObjectURL(blob); els.downloadLink.style.display = 'block';
+        updateStatus(`✅ 抽出完了！${pixels.length-1}フレーム (${(csv.length/1024).toFixed(1)}KB)`);
+        log(`完了: ${pixels.length-1}フレーム, ${totalSteps}予定`);
+        setButtons(); updatePixelPreview();
+      }
+    });
+
+    // 中断
+    els.stop.addEventListener('click', () => {
+      isExtracting = isAnalyzing = false; els.video.pause();
+      updateStatus('⏹️ 処理を中断しました'); setButtons(); els.progress.style.display = 'none'; els.pixelInfo.style.display = 'block';
+    });
+
+    log('🚀 Video Pixel Extractor 完全版開始 - プレビュー960x540 + 全機能実装');
+    updateStatus('準備完了！MP4を選択して開始');
+  </script>
+</body>
+</html>
