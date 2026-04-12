@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width">
-  <title>MP4 Pixel Exporter 堅牢版</title>
+  <title>Video Pixel Exporter（フレーム間隔版）</title>
   <style>body{font-family:sans-serif;max-width:900px;margin:24px auto;padding:0 16px;}
   video,canvas{max-width:100%;display:block;margin:12px 0;}
   label{display:block;margin:8px 0;}
@@ -16,14 +16,17 @@
   </style>
 </head>
 <body>
-  <h1>MP4 → 指定座標の画素値 → CSV（堅牢版）</h1>
+  <h1>MP4 → 指定座標の画素値 → CSV（フレーム間隔）</h1>
 
   <input id="file" type="file" accept="video/mp4,.mp4">
   <label>X: <input id="x" type="number" value="280" min="0"></label>
   <label>Y: <input id="y" type="number" value="180" min="0"></label>
-  <label>間隔(秒): <input id="interval" type="number" value="1" min="0.1" step="0.1"></label>
-  <label>開始(秒): <input id="start" type="number" value="0" min="0" step="1"></label>
-  <label>終了(秒): <input id="end" type="number" value="60" min="0" step="1"></label>
+  
+  <!-- ★ フレーム間隔に変更 -->
+  <label>間隔(フレーム): <input id="frameInterval" type="number" value="30" min="1"></label>
+  <label>FPS: <span id="fpsDisplay">-</span></label>
+  <label>開始フレーム: <input id="startFrame" type="number" value="0" min="0"></label>
+  <label>終了フレーム: <input id="endFrame" type="number" value="1800" min="0"></label>
 
   <button id="test1">1フレーム取得＋検証</button>
   <button id="extract">範囲抽出→CSV</button>
@@ -35,18 +38,39 @@
   <div id="controls">
     <label><input id="showCross" type="checkbox" checked> 十字表示</label>
     <label>十字サイズ: <input id="crossSize" type="range" min="5" max="30" value="10"><span id="crossSizeVal">10px</span></label>
-    <label><input id="robustMode" type="checkbox" checked> 堅牢モード（遅延待ち）</label>
+    <label><input id="robustMode" type="checkbox" checked> 堅牢モード</label>
+    <label>ファイル: <span id="fileInfo"></span></label>
   </div>
 
   <script>
     const els={file:document.getElementById('file'),x:document.getElementById('x'),y:document.getElementById('y'),
-      interval:document.getElementById('interval'),start:document.getElementById('start'),end:document.getElementById('end'),
+      frameInterval:document.getElementById('frameInterval'),fpsDisplay:document.getElementById('fpsDisplay'),
+      startFrame:document.getElementById('startFrame'),endFrame:document.getElementById('endFrame'),
       test1:document.getElementById('test1'),extract:document.getElementById('extract'),stop:document.getElementById('stop'),
       video:document.getElementById('video'),canvas:document.getElementById('canvas'),status:document.getElementById('status'),
       showCross:document.getElementById('showCross'),crossSize:document.getElementById('crossSize'),crossSizeVal:document.getElementById('crossSizeVal'),
-      robustMode:document.getElementById('robustMode')};
+      robustMode:document.getElementById('robustMode'),fileInfo:document.getElementById('fileInfo')};
     const ctx=els.canvas.getContext('2d',{willReadFrequently:true});
     let objectUrl=null,isExtracting=false;
+
+    els.file.addEventListener('change',()=>{
+      if(objectUrl)URL.revokeObjectURL(objectUrl);
+      const file=els.file.files[0];
+      if(!file) return;
+      objectUrl=URL.createObjectURL(file);
+      els.video.src=objectUrl;
+      els.fileInfo.textContent=`${file.name} (${(file.size/1024/1024).toFixed(1)}MB)`;
+      updateStatus(`動画読み込み中: ${file.name}`);
+    });
+
+    // FPS表示更新
+    els.video.addEventListener('loadedmetadata',()=>{
+      const fps=Math.round(els.video.playbackRate*100)/100 || 30;
+      els.fpsDisplay.textContent=fps;
+      const totalFrames=Math.floor(els.video.duration*fps);
+      els.endFrame.value=totalFrames;
+      updateStatus(`総フレーム数: ${totalFrames} (${els.video.duration.toFixed(1)}秒)`);
+    });
 
     function drawCross(x,y,size,color='red'){
       ctx.strokeStyle=color;ctx.lineWidth=3;ctx.lineCap='round';
@@ -69,24 +93,26 @@
     els.showCross.addEventListener('change',redrawCross);
     els.crossSize.addEventListener('input',()=>{els.crossSizeVal.textContent=els.crossSize.value+'px';redrawCross();});
 
-    els.file.addEventListener('change',()=>{
-      if(objectUrl)URL.revokeObjectURL(objectUrl);
-      const file=els.file.files[0];if(!file)return;
-      objectUrl=URL.createObjectURL(file);els.video.src=objectUrl;updateStatus('動画読み込み中...');
-    });
-
     function updateStatus(msg,className=''){
       els.status.textContent=`[${new Date().toLocaleTimeString()}] ${msg}`;
       els.status.className=className;
       console.log(msg);
     }
 
-    // 堅牢なフレーム同期取得
-    async function getFramePixelSafely(targetTime,x,y){
+    async function waitVideoReady(){
+      return new Promise(r=>{if(els.video.readyState>=2)return r();els.video.addEventListener('loadeddata',r,{once:true});});
+    }
+
+    // ★ フレーム番号→時間変換
+    function frameToTime(frame,fps){
+      return frame / fps;
+    }
+
+    async function getFramePixelSafely(targetFrame,x,y){
+      const fps=els.video.playbackRate || 30;
+      const targetTime=frameToTime(targetFrame,fps);
       return new Promise(async (resolve,reject)=>{
         els.video.currentTime=targetTime;
-        
-        // seek完了を待つ
         await new Promise((r,reject)=>{
           const timeout=Date.now()+3000;
           const checkSeeked=()=>{
@@ -96,85 +122,21 @@
           };
           requestAnimationFrame(checkSeeked);
         });
-        
-        // 堅牢モード：追加遅延＋複数回試行
-        if(els.robustMode.checked){
-          await new Promise(r=>setTimeout(r,50)); // デコード遅延待ち
-        }
-        
+        if(els.robustMode.checked) await new Promise(r=>setTimeout(r,50));
         els.canvas.width=els.video.videoWidth;
         els.canvas.height=els.video.videoHeight;
         ctx.drawImage(els.video,0,0);
-        
-        // 画素値取得
         const data=ctx.getImageData(Math.floor(x),Math.floor(y),1,1).data;
         resolve([data[0],data[1],data[2],data[3]]);
       });
     }
 
     els.test1.addEventListener('click',async()=>{
-      if(!els.file.files[0]){updateStatus('MP4を選択','error');return;}
+      if(!els.file.files[0]){updateStatus('ファイルを選択','error');return;}
       const x=Number(els.x.value),y=Number(els.y.value);
-      await new Promise(r=>setTimeout(r,100)); // 準備時間
+      await new Promise(r=>setTimeout(r,100));
       const w=els.video.videoWidth,h=els.video.videoHeight;
       if(x>=w||y>=h||x<0||y<0){updateStatus(`座標エラー: ${w}x${h}`,'error');return;}
-      
       try{
         updateStatus('1フレーム取得中...');
-        const [r,g,b,a]=await getFramePixelSafely(els.video.currentTime,x,y);
-        ctx.clearRect(0,0,els.canvas.width,els.canvas.height);
-        ctx.drawImage(els.video,0,0);
-        if(els.showCross.checked) drawCross(x,y,Number(els.crossSize.value),'lime');
         
-        updateStatus(`✓ x=${x},y=${y}: R=${r},G=${g},B=${b},A=${a}`);
-        console.log({x,y,r,g,b,a,time:els.video.currentTime});
-      }catch(e){
-        updateStatus(`エラー: ${e}`,'error');
-      }
-    });
-
-    els.extract.addEventListener('click',async()=>{
-      if(!els.file.files[0]||isExtracting)return;
-      isExtracting=true;els.extract.disabled=true;els.stop.disabled=false;
-      const x=Number(els.x.value),y=Number(els.y.value),interval=Number(els.interval.value),
-        startSec=Number(els.start.value),endSec=Math.min(Number(els.end.value),els.video.duration);
-      
-      const w=els.video.videoWidth,h=els.video.videoHeight;
-      if(x>=w||y>=h){updateStatus(`座標エラー: ${w}x${h}`,'error');resetExtract();return;}
-      
-      els.canvas.width=w;els.canvas.height=h;
-      const rows=[],totalFrames=Math.ceil((endSec-startSec)/interval);
-      let frame=0;
-      
-      try{
-        for(let t=startSec;t<endSec;t+=interval){
-          if(!isExtracting)break;
-          const [r_,g_,b_,a_]=await getFramePixelSafely(t,x,y);
-          rows.push([frame,t,x,y,r_,g_,b_,a_]);
-          
-          ctx.clearRect(0,0,els.canvas.width,els.canvas.height);
-          ctx.drawImage(els.video,0,0);
-          if(els.showCross.checked) drawCross(x,y,Number(els.crossSize.value),'lime');
-          
-          updateStatus(`フレーム ${frame}/${totalFrames} (${Math.round(frame/totalFrames*100)}%) R=${r_}G=${g_}B=${b_}`);
-          frame++;
-        }
-        downloadCsv(rows,`pixels_x${x}_y${y}_${startSec}-${endSec}s_interval${interval}s.csv`);
-      }catch(e){
-        updateStatus(`処理エラー: ${e}`,'error');
-      }
-      resetExtract();
-    });
-
-    function downloadCsv(rows,filename){
-      const csv=[['frame','time','x','y','r','g','b','a'],...rows.map(row=>row.map(v=>String(v)).join(','))].join('\n');
-      const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});const url=URL.createObjectURL(blob);
-      const a=document.createElement('a');a.href=url;a.download=filename;a.click();URL.revokeObjectURL(url);
-      updateStatus(`CSV完了: ${rows.length}フレーム`);
-    }
-
-    els.stop.addEventListener('click',()=>{isExtracting=false;updateStatus('中断');resetExtract();});
-    function resetExtract(){isExtracting=false;els.extract.disabled=false;els.stop.disabled=true;}
-  </script>
-</body>
-</html>
