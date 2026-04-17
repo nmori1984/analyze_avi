@@ -1,0 +1,823 @@
+<!doctype html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MP4 Frame OCR</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            margin: 16px;
+            color: #111;
+        }
+
+        h1, h2 {
+            margin: 0 0 12px;
+        }
+
+        .section {
+            margin-top: 16px;
+        }
+
+        #video {
+            width: 100%;
+            max-width: 900px;
+            background: #000;
+            display: block;
+        }
+
+        .meta {
+            display: grid;
+            gap: 4px;
+            margin: 12px 0;
+        }
+
+        #snapshot-wrap {
+            position: relative;
+            display: inline-block;
+            max-width: 900px;
+            width: 100%;
+            border: 1px solid #ccc;
+            background: #000;
+            user-select: none;
+            touch-action: none;
+            overflow: hidden; /* オーバーレイがはみ出すのを防ぐ */
+        }
+
+        #snapshot {
+            display: block;
+            width: 100%;
+            height: auto;
+        }
+
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%; /* 初期値として設定 */
+            height: 100%; /* 初期値として設定 */
+            cursor: crosshair;
+        }
+
+        #selection {
+            position: absolute;
+            border: 2px solid red;
+            background: rgba(255, 0, 0, 0.08);
+            display: none;
+            pointer-events: none;
+            box-sizing: border-box;
+        }
+
+        .row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            align-items: center;
+            margin: 8px 0;
+        }
+
+        input[type="number"] {
+            width: 110px;
+        }
+
+        #test-result, #progress {
+            margin-top: 8px;
+            padding: 8px;
+            border: 1px solid #ccc;
+            min-height: 1.5em;
+            white-space: pre-wrap;
+            background-color: #f9f9f9;
+        }
+        #progress {
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+<h1>MP4 Frame OCR</h1>
+
+<div class="section">
+    <input type="file" id="upload" accept="video/mp4" />
+</div>
+
+<div class="section">
+    <video id="video" controls></video>
+</div>
+
+<div class="section meta">
+    <div id="fps">FPS: -</div>
+    <div id="duration">Duration: -</div>
+    <div id="frames">Frame count: -</div>
+    <div id="resolution">Resolution: -</div>
+</div>
+
+<div class="section">
+    <h2>1. Seek to frame</h2>
+    <div class="row">
+        <button id="capture-btn">現在フレームを画像へ反映</button>
+        <span>動画をシークしてから押してください。</span>
+    </div>
+    <div id="current-frame-info" style="margin-top: 8px; font-size: 14px;"></div>
+</div>
+
+<div class="section">
+    <h2>2. Snapshot & OCR region</h2>
+    <div id="snapshot-wrap">
+        <canvas id="snapshot"></canvas>
+        <canvas id="overlay"></canvas>
+        <div id="selection"></div>
+    </div>
+
+    <div class="row" style="margin-top: 12px;">
+        <button id="test-ocr" disabled>選択範囲でOCRテスト</button>
+    </div>
+
+    <div id="test-result"></div>
+</div>
+
+<div class="section">
+    <h2>3. Batch OCR Settings</h2>
+    <div class="row">
+        <label for="start-frame">開始フレーム:</label>
+        <input type="number" id="start-frame" value="0" min="0" />
+    </div>
+    <div class="row">
+        <label for="end-frame">終了フレーム:</label>
+        <input type="number" id="end-frame" value="0" min="0" />
+    </div>
+    <div class="row">
+        <label for="frame-interval">フレーム間隔:</label>
+        <input type="number" id="frame-interval" value="1" min="1" />
+    </div>
+    <div class="row">
+        <button id="start-batch-ocr" disabled>OCR処理開始</button>
+    </div>
+    <div id="progress">進捗: 読み込み中...</div>
+</div>
+
+<div class="section">
+    <h2>4. Download Results</h2>
+    <div class="row">
+        <button id="download-csv" disabled>CSVダウンロード</button>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
+<script>
+    const upload = document.getElementById('upload');
+    const video = document.getElementById('video');
+    const captureBtn = document.getElementById('capture-btn');
+    const currentFrameInfoEl = document.getElementById('current-frame-info');
+    const snapshot = document.getElementById('snapshot');
+    const overlay = document.getElementById('overlay');
+    const selection = document.getElementById('selection');
+    const testBtn = document.getElementById('test-ocr');
+    const testResult = document.getElementById('test-result');
+
+    const fpsEl = document.getElementById('fps');
+    const durationEl = document.getElementById('duration');
+    const framesEl = document.getElementById('frames');
+    const resolutionEl = document.getElementById('resolution');
+
+    const startFrameInput = document.getElementById('start-frame');
+    const endFrameInput = document.getElementById('end-frame');
+    const frameIntervalInput = document.getElementById('frame-interval');
+    const startBatchOcrBtn = document.getElementById('start-batch-ocr');
+    const progressEl = document.getElementById('progress');
+    const downloadCsvBtn = document.getElementById('download-csv');
+
+    const snapCtx = snapshot.getContext('2d', { willReadFrequently: true });
+    const overlayCtx = overlay.getContext('2d');
+
+    let videoLoaded = false;
+    let fps = 30; 
+    let frameCount = 0;
+    let selectionState = null; // { x: number, y: number, w: number, h: number, startX: number, startY: number }
+    let dragging = false;
+
+    let worker = null; // Tesseract OCR worker
+    let ocrResults = []; // バッチ処理の結果を格納
+
+    function clamp(v, min, max) {
+        return Math.max(min, Math.min(max, v));
+    }
+
+    // キャンバス上の物理座標から論理座標へ変換
+    function getCanvasPoint(e, canvas) {
+        const r = canvas.getBoundingClientRect();
+        const clientX = e.clientX - r.left;
+        const clientY = e.clientY - r.top;
+        const x = clientX * canvas.width / r.width;
+        const y = clientY * canvas.height / r.height;
+        return {
+            x: clamp(x, 0, canvas.width),
+            y: clamp(y, 0, canvas.height)
+        };
+    }
+
+    function clearSelection() {
+        selectionState = null;
+        selection.style.display = 'none';
+        testResult.textContent = ''; 
+    }
+
+    function renderSelection(state) {
+        if (!state || state.w <= 0 || state.h <= 0) {
+            selection.style.display = 'none';
+            return;
+        }
+        const r = overlay.getBoundingClientRect();
+        const sx = r.width / overlay.width;
+        const sy = r.height / overlay.height;
+
+        selection.style.left = (state.x * sx) + 'px';
+        selection.style.top = (state.y * sy) + 'px';
+        selection.style.width = (state.w * sx) + 'px';
+        selection.style.height = (state.h * sy) + 'px';
+        selection.style.display = 'block';
+    }
+
+    function syncOverlaySize() {
+        if (snapshot.width === 0 || snapshot.height === 0) return;
+        overlay.width = snapshot.width;
+        overlay.height = snapshot.height;
+
+        const snapshotRect = snapshot.getBoundingClientRect();
+        overlay.style.width = snapshotRect.width + 'px';
+        overlay.style.height = snapshotRect.height + 'px';
+
+        if (selectionState) renderSelection(selectionState);
+    }
+
+    async function drawCurrentFrame() {
+        if (!videoLoaded || video.videoWidth === 0 || video.videoHeight === 0 || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+            console.warn('Video not loaded, has zero dimensions, or not ready to draw frame. Current readyState:', video.readyState);
+            return;
+        }
+
+        await new Promise(resolve => {
+            requestAnimationFrame(() => {
+                snapshot.width = video.videoWidth;
+                snapshot.height = video.videoHeight;
+                snapCtx.drawImage(video, 0, 0, snapshot.width, snapshot.height);
+                console.log(`[drawCurrentFrame] Snapshot drawn: ${snapshot.width}x${snapshot.height}, video readyState: ${video.readyState}, time: ${video.currentTime.toFixed(2)}s`);
+                resolve();
+            });
+        });
+
+        try {
+            const imageData = snapCtx.getImageData(0, 0, 1, 1).data;
+            if (imageData[3] === 0 && imageData[0] === 0 && imageData[1] === 0 && imageData[2] === 0) {
+                console.warn('[drawCurrentFrame] Top-left pixel of snapshot canvas is fully transparent black. Image might be empty/black due to timing or CORS.');
+            } else {
+                 console.log(`[drawCurrentFrame] Top-left pixel: R=${imageData[0]}, G=${imageData[1]}, B=${imageData[2]}, A=${imageData[3]}`);
+            }
+        } catch (e) {
+            console.warn('[drawCurrentFrame] Could not check snapshot pixel data (likely CORS or security).', e);
+        }
+
+        syncOverlaySize();
+        clearSelection();
+        overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+        updateCurrentFrameInfo();
+    }
+
+    function updateCurrentFrameInfo() {
+        currentFrameInfoEl.textContent = `現在のフレーム: ${Math.round(video.currentTime * fps)} / タイム: ${video.currentTime.toFixed(2)}s`;
+    }
+
+    /**
+     * video要素を指定した時間'time'にシークし、フレームが描画されるのを待ちます。
+     * @param {HTMLVideoElement} videoElement
+     * @param {number} time - シークする秒数
+     * @returns {Promise<void>}
+     */
+    async function seekVideoAndAwaitFrame(videoElement, time) {
+        console.log(`[seekVideoAndAwaitFrame] Seeking video to ${time.toFixed(2)}s. Current time: ${videoElement.currentTime.toFixed(2)}s, duration: ${videoElement.duration > 0 ? videoElement.duration.toFixed(2) : 'N/A'}s`);
+        
+        let targetTime = time;
+        if (videoElement.duration > 0 && !isNaN(videoElement.duration)) {
+            targetTime = clamp(time, 0, videoElement.duration);
+        }
+        
+        // 既に目標時間に非常に近い場合はシークをスキップまたは微調整
+        if (Math.abs(videoElement.currentTime - targetTime) < 0.1 && videoElement.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+             console.log(`[seekVideoAndAwaitFrame] Already close to target time ${targetTime.toFixed(2)}s. Triggering seeked event workaround.`);
+             const delta = videoElement.duration > 0 && targetTime < videoElement.duration - 0.0001 ? 0.0001 : 0;
+             videoElement.currentTime = targetTime + delta; 
+             await new Promise(resolve => setTimeout(resolve, 50)); 
+             videoElement.currentTime = targetTime; 
+        } else {
+            console.log(`[seekVideoAndAwaitFrame] Initiated seek to ${targetTime.toFixed(2)}s.`);
+            videoElement.currentTime = targetTime;
+        }
+        
+
+        let resolved = false;
+        const seekedPromise = new Promise(resolve => {
+            const onSeeking = () => {
+                console.log(`[seekVideoAndAwaitFrame] Seeking started for ${targetTime.toFixed(2)}s.`);
+                videoElement.removeEventListener('seeking', onSeeking);
+            };
+            videoElement.addEventListener('seeking', onSeeking);
+
+            const onSeeked = () => {
+                videoElement.removeEventListener('seeked', onSeeked);
+                console.log(`[seekVideoAndAwaitFrame] Seeked event received for ${targetTime.toFixed(2)}s. Current video time: ${videoElement.currentTime.toFixed(2)}s.`);
+                resolved = true;
+                resolve();
+            };
+            videoElement.addEventListener('seeked', onSeeked);
+        });
+
+        const timeoutPromise = new Promise(resolve => setTimeout(() => {
+             if (!resolved) {
+                 console.warn(`[seekVideoAndAwaitFrame] Seeked event timed out after 1000ms for time ${targetTime.toFixed(2)}s. Current video readyState: ${videoElement.readyState}, time: ${videoElement.currentTime.toFixed(2)}s`);
+             }
+             resolve();
+         }, 1000));
+
+        await Promise.race([seekedPromise, timeoutPromise]);
+        videoElement.currentTime = targetTime; 
+        
+        let retryCount = 0;
+        const MAX_RETRY_READYSTATE = 20; 
+        while (videoElement.readyState < HTMLMediaElement.HAVE_CURRENT_DATA && retryCount < MAX_RETRY_READYSTATE) {
+            console.log(`[seekVideoAndAwaitFrame] Waiting for video to be ready (readyState: ${videoElement.readyState}). Retry: ${retryCount + 1}/${MAX_RETRY_READYSTATE}`);
+            await new Promise(resolve => setTimeout(resolve, 100)); 
+            retryCount++;
+        }
+        if (retryCount >= MAX_RETRY_READYSTATE) {
+            console.error(`[seekVideoAndAwaitFrame] Video did not become ready for drawing after ${MAX_RETRY_READYSTATE * 100}ms for time ${targetTime.toFixed(2)}s.`);
+        } else {
+            console.log(`[seekVideoAndAwaitFrame] Video ready for drawing (readyState: ${videoElement.readyState}) after ${retryCount * 100}ms wait.`);
+        }
+        console.log(`[seekVideoAndAwaitFrame] Final state after seek operation. Video time: ${videoElement.currentTime.toFixed(2)}s, readyState: ${videoElement.readyState}`);
+    }
+
+    /**
+     * Tesseract OCR workerを初期化します。
+     */
+    async function initializeOcrWorker() {
+        if (worker) {
+            console.log('[initializeOcrWorker] Worker already initialized.');
+            testBtn.disabled = false;
+            startBatchOcrBtn.disabled = false;
+            return;
+        }
+
+        progressEl.textContent = 'Tesseract OCRワーカーをロード中...';
+        testBtn.disabled = true; 
+        startBatchOcrBtn.disabled = true;
+
+        try {
+            // v4のcreateWorker(langs, oem, opts)はloadLanguage→initializeを内部で呼びますが、
+            // タイミング問題で api (TessBaseAPI) が null のまま setParameters が走ることがあります。
+            // 明示的に loadLanguage / initialize を呼ぶ旧スタイルの方が確実です。
+            const loggerFn = m => {
+                if (m.status === 'downloading' || m.status === 'initializing' || m.status === 'loading lang-data' || m.status === 'loading' || m.status === 'initializing api' || m.status === 'initialized api') {
+                    const progress = m.progress ? (m.progress * 100).toFixed(0) : '0';
+                    progressEl.textContent = `Tesseract OCR: ${m.status} ${progress}%`;
+                } else if (m.status === 'done') {
+                    progressEl.textContent = 'Tesseract OCRワーカーがロードされました。';
+                }
+            };
+
+            const tempWorker = await Tesseract.createWorker({
+                logger: loggerFn,
+                errorHandler: err => console.error('[Tesseract worker error]', err),
+                // .wasm / traineddata を IndexedDB にキャッシュ（2回目以降は再ダウンロード不要）
+                cacheMethod: 'write',
+            });
+
+            if (!tempWorker || typeof tempWorker.loadLanguage !== 'function') {
+                throw new Error('Tesseract.createWorker did not return a usable worker object.');
+            }
+
+            // 明示的に言語ロード→初期化
+            // OEM.TESSERACT_LSTM_COMBINED(=2) はLegacy+LSTM両方を使い、tessedit_char_whitelist が確実に効きます。
+            // ただし tessdata_best には Legacy モデルが含まれないため、デフォルトOEM(LSTM優先)にフォールバックできるようtry/catch。
+            await tempWorker.loadLanguage('eng');
+            try {
+                await tempWorker.initialize('eng', Tesseract.OEM.TESSERACT_LSTM_COMBINED);
+            } catch (initErr) {
+                console.warn('[initializeOcrWorker] LSTM+Legacy 初期化に失敗、デフォルトOEM(LSTMのみ)で再試行します:', initErr);
+                await tempWorker.initialize('eng');
+            }
+
+            worker = tempWorker;
+
+            try {
+                await worker.setParameters({
+                    tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789',
+                    preserve_interword_spaces: '1'
+                });
+            } catch (paramError) {
+                // whitelist がLSTMで効かない場合でも OCR 自体は動くので処理は続行する
+                console.warn('[initializeOcrWorker] setParameters 失敗（LSTMのみの場合は whitelist が無視されます）:', paramError);
+            }
+
+            progressEl.textContent = 'Tesseract OCRワーカーがロードされました。';
+            console.log('[initializeOcrWorker] Tesseract worker loaded and initialized.');
+            testBtn.disabled = false;
+            startBatchOcrBtn.disabled = false;
+
+        } catch (error) {
+            const errorMessage = (error && typeof error === 'object' && error.message)
+                ? `Tesseractワーカー生成エラー: ${error.message}`
+                : `不明なTesseractワーカー生成エラー: ${String(error)}`;
+            progressEl.textContent = `Tesseract OCRワーカーのロードに失敗しました: ${errorMessage}`;
+            console.error('[initializeOcrWorker] Tesseract worker creation failed:', error);
+            worker = null; 
+        } finally {
+            if (!worker) {
+                testBtn.disabled = true;
+                startBatchOcrBtn.disabled = true;
+            }
+        }
+    }
+    
+    /**
+     * キャンバスが画素データ的に空でないかチェックするヘルパー関数
+     * @param {HTMLCanvasElement} canvas
+     * @param {CanvasRenderingContext2D} ctx
+     * @returns {boolean} true if canvas is empty (all transparent or black), false otherwise
+     */
+    function isCanvasEffectivelyEmpty(canvas, ctx) {
+        if (canvas.width === 0 || canvas.height === 0) {
+            console.log('isCanvasEffectivelyEmpty: Canvas has zero dimensions.');
+            return true;
+        }
+        try {
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            for (let i = 0; i < imageData.data.length; i += 4) {
+                if (imageData.data[i+3] !== 0 || 
+                    imageData.data[i] !== 0 || imageData.data[i+1] !== 0 || imageData.data[i+2] !== 0) 
+                {
+                    return false; 
+                }
+            }
+            console.log('isCanvasEffectivelyEmpty: Canvas is effectively empty (all transparent or transparent black).');
+            return true;
+        } catch (e) {
+            console.warn('[isCanvasEffectivelyEmpty] Could not check imageData for canvas (likely CORS or security restrictions). Assuming not empty if dimensions > 0 and drawImage had no error previously.', e);
+            return false; 
+        }
+    }
+
+
+    // --- イベントリスナー ---
+
+    upload.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) {
+            videoLoaded = false;
+            return;
+        }
+
+        // リモートサーバーからの動画をロードする場合にのみcrossOriginを設定
+        // ローカルファイルの場合、crossOriginの設定は無視されるか、セキュリティエラーの原因となることがあります。
+        // video.crossOrigin = "anonymous"; 
+        
+        video.src = URL.createObjectURL(file);
+        videoLoaded = true;
+
+        await new Promise(resolve => {
+            video.addEventListener('loadedmetadata', () => {
+                console.log('[loadedmetadata] event fired.');
+                resolve();
+            }, { once: true });
+        });
+        console.log('[upload.change] Video loadedmetadata event fired. Video dimensions:', video.videoWidth, 'x', video.videoHeight);
+
+        video.pause(); 
+        await seekVideoAndAwaitFrame(video, 0); 
+
+        const dur = video.duration || 0;
+        fps = 30; 
+        frameCount = Math.floor(dur * fps);
+
+        fpsEl.textContent = `FPS: ${fps.toFixed(2)}`;
+        durationEl.textContent = `Duration: ${dur.toFixed(2)} s`;
+        framesEl.textContent = `Frame count: ${frameCount}`;
+        resolutionEl.textContent = `Resolution: ${video.videoWidth} × ${video.videoHeight}`;
+
+        await drawCurrentFrame(); 
+        testResult.textContent = ''; 
+
+        startFrameInput.value = 0;
+        endFrameInput.value = frameCount > 0 ? frameCount - 1 : 0;
+
+        await initializeOcrWorker();
+    });
+
+    captureBtn.addEventListener('click', async () => {
+        if (!videoLoaded) {
+            testResult.textContent = '動画が読み込まれていません。';
+            return;
+        }
+        testResult.textContent = 'フレームを読み込み中...';
+        
+        await seekVideoAndAwaitFrame(video, video.currentTime);
+        await drawCurrentFrame(); 
+        testResult.textContent = '現在フレームをスナップショットへ反映しました。';
+    });
+
+    video.addEventListener('timeupdate', () => {
+        if (videoLoaded && video.paused) {
+            updateCurrentFrameInfo();
+        }
+    });
+
+    video.addEventListener('seeked', () => {
+        if (videoLoaded) {
+            // スナップショットの自動更新は captureBtn に任せる
+        }
+    });
+
+
+    overlay.addEventListener('pointerdown', (e) => {
+        if (!videoLoaded || snapshot.width === 0) return;
+        overlay.setPointerCapture(e.pointerId);
+        const p = getCanvasPoint(e, overlay);
+        selectionState = { x: p.x, y: p.y, w: 0, h: 0, startX: p.x, startY: p.y };
+        dragging = true;
+        renderSelection(selectionState);
+    });
+
+    overlay.addEventListener('pointermove', (e) => {
+        if (!dragging || !selectionState) return;
+        const p = getCanvasPoint(e, overlay);
+        const currentX = p.x;
+        const currentY = p.y;
+
+        selectionState.x = Math.min(selectionState.startX, currentX);
+        selectionState.y = Math.min(selectionState.startY, currentY);
+        selectionState.w = Math.abs(currentX - selectionState.startX);
+        selectionState.h = Math.abs(currentY - selectionState.startY);
+        
+        renderSelection(selectionState);
+    });
+
+    overlay.addEventListener('pointerup', (e) => {
+        dragging = false;
+        if (!selectionState) return;
+
+        if (selectionState.w < 2 || selectionState.h < 2) {
+            clearSelection();
+            testResult.textContent = '矩形が小さすぎます。もう一度選択してください。(UP)';
+            return;
+        }
+
+        renderSelection(selectionState);
+        testResult.textContent = `選択範囲: x=${Math.round(selectionState.x)}, y=${Math.round(selectionState.y)}, w=${Math.round(selectionState.w)}, h=${Math.round(selectionState.h)}`;
+    });
+
+    overlay.addEventListener('pointercancel', () => {
+        dragging = false;
+    });
+
+    testBtn.addEventListener('click', async () => {
+        if (!videoLoaded) {
+            testResult.textContent = '先に動画読み込みが行われていません。';
+            return;
+        }
+        if (!worker) {
+            testResult.textContent = 'OCRワーカーの準備ができていません。動画をアップロードし、ワーカーがロードされるまでお待ちください。';
+            return;
+        }
+        if (snapshot.width === 0 || snapshot.height === 0 || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+            testResult.textContent = `スナップショット画像が空か、動画の準備ができていません (readyState: ${video.readyState})。動画を読み込み、「現在フレームを画像へ反映」ボタンを押してください。`;
+            console.error('Snapshot is empty or video not ready for OCR test:', { snapshotWidth: snapshot.width, snapshotHeight: snapshot.height, videoReadyState: video.readyState });
+            return;
+        }
+        if (!selectionState || selectionState.w <= 0 || selectionState.h <= 0) {
+            testResult.textContent = 'OCR対象の矩形が選択されていません。';
+            return;
+        }
+
+        const x = selectionState.x;
+        const y = selectionState.y;
+        const w = selectionState.w;
+        const h = selectionState.h;
+
+        if (w <= 0 || h <= 0) {
+            testResult.textContent = '無効な矩形です。(TEST)';
+            return;
+        }
+        if (x < 0 || y < 0 || x + w > snapshot.width || y + h > snapshot.height) {
+            testResult.textContent = `OCRエラー: 選択された矩形がスナップショット画像の範囲外です (x:${x}, y:${y}, w:${w}, h:${h} vs snapshot:${snapshot.width}x${snapshot.height})`;
+            console.error(`Selection out of bounds for test: x=${x}, y=${y}, w=${w}, h=${h} | Snapshot: ${snapshot.width}x${snapshot.height}`);
+            return;
+        }
+
+        const crop = document.createElement('canvas');
+        crop.width = w;
+        crop.height = h;
+        const cctx = crop.getContext('2d', { willReadFrequently: true });
+        cctx.drawImage(snapshot, x, y, w, h, 0, 0, w, h);
+
+        console.log(`[testBtn.click] Cropped canvas dimensions: ${crop.width}x${crop.height} for x=${x}, y=${y}, w=${w}, h=${h}`);
+
+        if (isCanvasEffectivelyEmpty(crop, cctx)) {
+            testResult.textContent = 'OCRエラー: 切り出された画像が空または完全に透明です。スナップショットが正しく表示されているか、選択範囲が描画内容を含んでいるか確認してください。';
+            console.error('[testBtn.click] Cropped canvas is effectively empty after drawImage for test. This likely means the snapshot was black or out of bounds.');
+            return;
+        }
+        console.log(`[testBtn.click] Cropped canvas for test is not empty.`);
+
+        testResult.textContent = 'OCR実行中...';
+
+        try {
+            const { data: { text } } = await worker.recognize(crop);
+            testResult.textContent = text.trim() || '(no-text)';
+        } catch (error) {
+            const errorMessage = (error && typeof error === 'object' && error.message)
+                ? `Tesseractエラー: ${error.message}`
+                : `不明なOCRエラー: ${String(error)}`;
+            testResult.textContent = `OCRエラー: ${errorMessage}`;
+            console.error('[testBtn.click] OCR test failed:', error);
+        }
+    });
+
+    startBatchOcrBtn.addEventListener('click', async () => {
+        if (!videoLoaded) {
+            progressEl.textContent = '動画の読み込みが行われていません。';
+            return;
+        }
+        if (!worker) {
+            progressEl.textContent = 'OCRワーカーの準備ができていません。動画をアップロードし、ワーカーがロードされるまでお待ちください。';
+            return;
+        }
+        if (video.videoWidth === 0 || video.videoHeight === 0 || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+            progressEl.textContent = `OCRエラー: 動画の解像度が取得できていないか、動画の準備ができていません (readyState: ${video.readyState})。動画をアップロード後、一度再生してみてください。`;
+            console.error('Video not ready for batch OCR:', { videoWidth: video.videoWidth, videoHeight: video.videoHeight, videoReadyState: video.readyState });
+            return;
+        }
+        if (!selectionState || selectionState.w <= 0 || selectionState.h <= 0) {
+            progressEl.textContent = 'OCR対象の矩形が選択されていません。';
+            return;
+        }
+
+        const startFrame = parseInt(startFrameInput.value, 10);
+        const endFrame = parseInt(endFrameInput.value, 10);
+        const interval = parseInt(frameIntervalInput.value, 10);
+
+        if (isNaN(startFrame) || isNaN(endFrame) || isNaN(interval) || startFrame < 0 || endFrame >= frameCount || startFrame > endFrame || interval <= 0) {
+            progressEl.textContent = '無効なフレーム範囲または間隔です。';
+            return;
+        }
+
+        ocrResults = [];
+        downloadCsvBtn.disabled = true;
+        startBatchOcrBtn.disabled = true;
+        progressEl.textContent = 'OCR処理開始...';
+
+        const x = selectionState.x;
+        const y = selectionState.y;
+        const w = selectionState.w;
+        const h = selectionState.h;
+
+        if (w <= 0 || h <= 0) {
+            progressEl.textContent = 'OCRエラー: 無効な矩形です。(BATCH)';
+            startBatchOcrBtn.disabled = false;
+            return;
+        }
+        if (x < 0 || y < 0 || x + w > video.videoWidth || y + h > video.videoHeight) {
+            progressEl.textContent = `OCRエラー: 選択された矩形が動画フレームの範囲外です (x:${x}, y:${y}, w:${w}, h:${h} vs video:${video.videoWidth}x${video.videoHeight})`;
+            startBatchOcrBtn.disabled = false;
+            return;
+        }
+
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = video.videoWidth;
+        tempCanvas.height = video.videoHeight;
+        const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
+
+        const cropCanvas = document.createElement('canvas');
+        cropCanvas.width = w;
+        cropCanvas.height = h;
+        const cropCtx = cropCanvas.getContext('2d', { willReadFrequently: true });
+
+        for (let i = startFrame; i <= endFrame; i += interval) {
+            const time = i / fps;
+            
+            await seekVideoAndAwaitFrame(video, time);
+
+            if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+                const errorMessage = `フレーム ${i} で動画の準備ができていません (readyState: ${video.readyState})。このフレームのOCRをスキップします。`;
+                console.error(`[startBatchOcrBtn.click] ${errorMessage}`);
+                ocrResults.push({ frame: i, time: time.toFixed(2), text: `ERROR: ${errorMessage}` });
+                continue;
+            }
+            tempCtx.drawImage(video, 0, 0, tempCanvas.width, tempCanvas.height);
+            cropCtx.drawImage(tempCanvas, x, y, w, h, 0, 0, w, h);
+
+            console.log(`[startBatchOcrBtn.click] Batch Cropped canvas for frame ${i} dimensions: ${cropCanvas.width}x${cropCanvas.height}`);
+
+            if (isCanvasEffectivelyEmpty(cropCanvas, cropCtx)) {
+                const errorMessage = `フレーム ${i} の切り出された画像が空または完全に透明です。動画の内容を確認してください。`;
+                console.error(`[startBatchOcrBtn.click] ${errorMessage}`);
+                ocrResults.push({ frame: i, time: time.toFixed(2), text: `ERROR: ${errorMessage}` });
+                continue; 
+            }
+            console.log(`[startBatchOcrBtn.click] Batch Cropped canvas for frame ${i} is not empty.`);
+
+            const processedFrames = i - startFrame + 1;
+            const totalFramesToProcess = Math.floor((endFrame - startFrame) / interval) + 1;
+            const processedPercentage = (totalFramesToProcess > 0) ? (processedFrames / totalFramesToProcess * 100).toFixed(1) : 0;
+            progressEl.textContent = `フレーム ${i}/${endFrame} (${processedPercentage}%) を処理中...`;
+
+
+            try {
+                const { data: { text } } = await worker.recognize(cropCanvas);
+                ocrResults.push({ frame: i, time: time.toFixed(2), text: text.trim() });
+            } catch (error) {
+                console.error(`[startBatchOcrBtn.click] OCR failed for frame ${i}:`, error);
+                const errorMessage = (error && typeof error === 'object' && error.message)
+                    ? `Tesseractエラー: ${error.message}`
+                    : `不明なOCRエラー: ${String(error)}`;
+                ocrResults.push({ frame: i, time: time.toFixed(2), text: `ERROR: ${errorMessage}` });
+            }
+        }
+
+        progressEl.textContent = `OCR処理完了。 ${ocrResults.length} フレーム処理しました。`;
+        downloadCsvBtn.disabled = false;
+        startBatchOcrBtn.disabled = false;
+        console.log('[startBatchOcrBtn.click] Batch OCR processing completed.');
+    });
+
+    downloadCsvBtn.addEventListener('click', () => {
+        if (ocrResults.length === 0) {
+            alert('ダウンロードするデータがありません。');
+            return;
+        }
+
+        let csvContent = 'Frame,Time(s),OCR_Text\n';
+        ocrResults.forEach(row => {
+            const escapedText = row.text.replace(/"/g, '""');
+            csvContent += `${row.frame},${row.time},"${escapedText}"\n`;
+        });
+
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'ocr_results.csv';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        console.log('[downloadCsvBtn.click] CSV downloaded.');
+    });
+
+
+    window.addEventListener('resize', () => {
+        if (videoLoaded && snapshot.width > 0 && snapshot.height > 0) {
+            syncOverlaySize();
+        }
+    });
+
+    // 初期メッセージ設定
+    testResult.textContent = '';
+    progressEl.textContent = 'ページロードが完了しました。動画をアップロードしてOCRワーカーをロードしてください。';
+    console.log('[Initialization] Script loaded.');
+</script>
+</body>
+</html>
+
+
+<!--
+
+
+
+JSベースの静的なWEBサイトで、MP4ファイルの指定箇所にOCRを適用し、結果を集計してCSV出力します。
+以下の仕様に沿ってコードを作成してください。省略せずに全てを提示してください。
+
+＜主な仕様＞
+- MP4ファイルの縦横解像度およびFPSは任意です。
+- OCRはネット上で公開されているJSベースの適当なOCRエンジンを使用してください。OCR対象は英語大文字、小文字、数字、のみです。
+- OCRエンジンは、初回実行時はダウンロードしてよいですが、２回目以降はローカルにキャッシュされることとしてください。
+＜主なUX＞
+- ユーザがビデオをUPLOAD
+- ビデオの静的解析を行い、FPS、フレーム長、解像度、などを取得する。画面表示する。
+- ビデオのプレ一バックが表示される
+- ユーザがビデオの任意フレームにシーク
+- 別コンポーネントに、シーク位置の画像が表示される。
+- ユーザが画面上でクリックすると、矩形を指定できる
+- 矩形を指定したら、OCRの動作テストを行い、結果を表示する
+- ユーザは開始フレーム、終了フレーム、フレームインターバル、を指定する
+- 処理開始ボタンを押すと、指定したフレームごとにOCRを実行する。進捗状況は都度画面上に表示される
+- 処理が完了するとCSVファイルをダウンロード
+
+
+確認していただきたいこと
+このコードを試していただく際、以下の点を確認し、その結果を教えていただけますでしょうか？
+
+ブラウザの開発者ツール (F12キーで開けます):
+
+コンソール (Console) タブ: Tesseract OCRワーカーのロード中に、何かエラーメッセージや警告メッセージが出ていないか確認してください。特にネットワーク関連のエラー（例: Failed to load resource）がないか。
+ネットワーク (Network) タブ: ページを再ロードし、.wasm や .traineddata.gz といったファイルが Tesseract.js によって正しくダウンロードされているか確認してください。ダウンロードが失敗している場合、ステータスコード（例: 404, 0）を確認してください。
+progressEl のメッセージ: Tesseract OCRワーカーのロード中に、例えば「Tesseract OCR: downloading xx%」といった進捗メッセージが表示されるか、どこかで止まるか、エラーメッセージに変化があるか教えてください。
+
+-->
